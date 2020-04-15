@@ -1,0 +1,14 @@
+title plex-backhaul
+
+Browser->Proxy: Normal request
+Proxy->Server: Normal request
+Server->(4)Proxy: Normal response
+Proxy->Browser: Normal response
+
+note over Browser,Server:Handling individual stream request
+Browser->Proxy: DASH Segment request
+Proxy->Server: Content-Length request
+Server->Proxy: Content-Length headers
+Proxy->Server: Parallel chunk requests
+Server->(1)Proxy: DASH Segment chunks
+Proxy->Browser: DASH Segment response
