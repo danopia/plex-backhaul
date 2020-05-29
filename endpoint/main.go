@@ -17,7 +17,7 @@ func main() {
 		log.Fatal(err)
 	}
 	proxyClient.MaxConcurrency = 4
-	go proxyClient.MaintainSockets(8)
+	go proxyClient.LaneManager.MaintainSockets(8)
 
 	// start server
 	log.Println("lets go")

@@ -10,7 +10,7 @@ type BackhaulChannel struct {
 	FeedC      chan []byte
 	OutC       chan []byte
 	DoneC      <-chan struct{}
-	Sockets    []*BackhaulSocket
+	Sockets    []*DataLane
 	Offset     uint64
 	Done       bool
 	lock       sync.Mutex
@@ -21,7 +21,7 @@ type chanReader struct {
 	channel *BackhaulChannel
 }
 
-func NewBackhaulChannel(socks []*BackhaulSocket) (*BackhaulChannel, io.ReadCloser) {
+func NewBackhaulChannel(socks []*DataLane) (*BackhaulChannel, io.ReadCloser) {
 	r, w := io.Pipe()
 	doneC := make(chan struct{})
 	channel := &BackhaulChannel{

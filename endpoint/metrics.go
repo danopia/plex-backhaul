@@ -12,13 +12,11 @@ func (pc *ProxyClient) runMetrics(intervalSecs int) {
 		panic(err)
 	}
 	emitter.CollectForever(intervalSecs, func(batch *common.MetricsBatch) {
-		pc.lock.Lock()
-		defer pc.lock.Unlock()
 
-		batch.AddGauge("live_sockets", float64(len(pc.Backhauls)))
-		batch.AddGauge("live_channels", float64(len(pc.Channels)))
+		pc.LaneManager.lock.Lock()
+		batch.AddGauge("live_sockets", float64(len(pc.LaneManager.Lanes)))
 
-		for sockId, sock := range pc.Backhauls {
+		for sockId, sock := range pc.LaneManager.Lanes {
 			sockTag := "plex_sock:" + sockId
 
 			if sock.InUse > 0 {
@@ -26,6 +24,10 @@ func (pc *ProxyClient) runMetrics(intervalSecs int) {
 			}
 			batch.AddGauge("socket.inuse", float64(sock.InUse), sockTag)
 		}
+		pc.LaneManager.lock.Unlock()
+
+		pc.lock.Lock()
+		batch.AddGauge("live_channels", float64(len(pc.Channels)))
 
 		waitingPackets := 0
 		blockedSockets := 0
@@ -33,6 +35,7 @@ func (pc *ProxyClient) runMetrics(intervalSecs int) {
 			waitingPackets += len(channel.OutC)
 			blockedSockets += len(channel.readySocks)
 		}
+		pc.lock.Unlock()
 		batch.AddGauge("waiting_packets", float64(waitingPackets))
 		batch.AddGauge("socket.blocked", float64(blockedSockets))
 	})
