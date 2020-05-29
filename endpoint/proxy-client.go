@@ -20,6 +20,8 @@ import (
 // Paths matching this get the websocket treatment
 var tunnelPattern = regexp.MustCompile("/transcode/universal/dash/|/chunk-|download=1|/file.mp4")
 
+var precachePattern = regexp.MustCompile("/([0-9]+)/([0-9]+.m4s)$")
+
 type ProxyClient struct {
 	BaseURL        string
 	DirectURL      *url.URL
@@ -113,14 +115,11 @@ func (pc *ProxyClient) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 	}
 }
 
-// Unconditionally processes the request through the multiplexing tunnel
-func (pc *ProxyClient) RoundTrip(req *http.Request) (*http.Response, error) {
-	t0 := time.Now()
-
+func (pc *ProxyClient) AllocateReqLanes(req *common.InnerReq) (*BackhaulChannel, io.ReadCloser, error) {
 	// select least-utilized sockets
 	sockKeys, socks := pc.LaneManager.AllocateLanes(pc.MaxConcurrency)
 	if len(socks) < 1 {
-		return nil, fmt.Errorf("No sockets available, sorry")
+		return nil, nil, fmt.Errorf("No sockets available, sorry")
 	}
 
 	pc.lock.Lock()
@@ -130,18 +129,16 @@ func (pc *ProxyClient) RoundTrip(req *http.Request) (*http.Response, error) {
 	pc.nextChanId++
 	pc.lock.Unlock()
 
-	tAlloced := time.Now()
+	req.BackhaulIds = sockKeys
+	req.ChanId =      chanId
+	return channel, chanReader, nil
+}
 
-	wireReq := common.InnerReq{
-		Method:      req.Method,
-		Path:        req.URL.Path,
-		Query:       req.URL.RawQuery,
-		Headers:     req.Header,
-		BackhaulIds: sockKeys,
-		ChanId:      chanId,
+func (pc *ProxyClient) SubmitWireRequest(wireReq *common.InnerReq) (*common.InnerResp, error) {
+	jsonValue, err := json.Marshal(wireReq)
+	if err != nil {
+		return nil, err
 	}
-
-	jsonValue, _ := json.Marshal(wireReq)
 	// log.Println(string(jsonValue))
 
   submitReq, err := http.NewRequest("POST", pc.BaseURL+"/backhaul/submit", bytes.NewBuffer(jsonValue))
@@ -160,6 +157,37 @@ func (pc *ProxyClient) RoundTrip(req *http.Request) (*http.Response, error) {
 		return nil, err
 	}
 	resp.Body.Close()
+
+	return &wireResp, nil
+}
+
+// Unconditionally processes the request through the multiplexing tunnel
+func (pc *ProxyClient) RoundTrip(req *http.Request) (*http.Response, error) {
+	t0 := time.Now()
+
+	wireReq := common.InnerReq{
+		Method:      req.Method,
+		Path:        req.URL.Path,
+		Query:       req.URL.RawQuery,
+		Headers:     req.Header,
+	}
+	channel, chanReader, err := pc.AllocateReqLanes(&wireReq)
+	if err != nil {
+		return nil, err
+	}
+
+	tAlloced := time.Now()
+
+	// if precachePattern.MatchString(wireReq.Path) {
+	// 	precachePath := precachePattern.ReplaceAllString(wireReq.Path, "/0/$1")
+	// 	log.Println("TODO: Precaching", precachePath)
+	// }
+
+	wireResp, err := pc.SubmitWireRequest(&wireReq)
+	if err != nil {
+		return nil, err
+	}
+
 	tSubmitted := time.Now()
 
 	// Cleanup when the response is all done
@@ -169,9 +197,9 @@ func (pc *ProxyClient) RoundTrip(req *http.Request) (*http.Response, error) {
 		defer pc.lock.Unlock()
 
 		// Delete our registration
-		delete(pc.Channels, chanId)
+		delete(pc.Channels, wireReq.ChanId)
 		// Unmark the sockets
-		for _, sock := range socks {
+		for _, sock := range channel.Sockets {
 			sock.InUse--
 		}
 	}()
