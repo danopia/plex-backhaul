@@ -1,0 +1,22 @@
+title plex-backhaul
+
+Browser->Endpoint: Normal request
+Endpoint->Headend: Normal request
+Headend->Server: Normal request
+Server->Headend: Normal response
+Headend->(1)Endpoint: Normal response
+Endpoint->Browser: Normal response
+
+note over Endpoint,Headend:Starting socket pool
+Endpoint->(1)Headend: Open sockets
+Headend->Endpoint: Issue IDs
+
+note over Browser,Server:Handling individual stream request
+Browser->Endpoint: DASH request
+Endpoint->Headend: DASH request
+Headend->Server: DASH request
+Server->Headend: DASH response header
+Headend->Endpoint: Response manifest
+Endpoint->Browser: Streaming body
+Server->Headend: DASH response chunks
+Headend->(1)Endpoint: DASH response chunks
