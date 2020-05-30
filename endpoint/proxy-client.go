@@ -1,11 +1,8 @@
 package main
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"net/http/httputil"
@@ -74,13 +71,6 @@ func NewProxyClient(targetUrl, hostId string) (*ProxyClient, error) {
 	return proxyClient, nil
 }
 
-var httpClient *http.Client = &http.Client{
-	Transport: &http.Transport{
-		MaxIdleConnsPerHost: 10,
-	},
-	// Timeout: time.Duration(RequestTimeout) * time.Second,
-}
-
 // Makes a decision about how a request should be serviced
 func (pc *ProxyClient) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 	// Update the headers to allow for SSL redirection
@@ -99,53 +89,6 @@ func (pc *ProxyClient) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		atomic.AddUint64(&pc.directTally, 1)
 		pc.directProxy.ServeHTTP(res, req)
 	}
-}
-
-func (pc *ProxyClient) SubmitWireRequest(wireReq *common.InnerReq) (*common.InnerResp, error) {
-	jsonValue, err := json.Marshal(wireReq)
-	if err != nil {
-		return nil, err
-	}
-	// log.Println(string(jsonValue))
-
-	submitReq, err := http.NewRequest("POST", pc.BaseURL+"/backhaul/submit", bytes.NewBuffer(jsonValue))
-	if err != nil {
-		return nil, err
-	}
-	submitReq.Header.Set("Content-Type", "application/json")
-	resp, err := httpClient.Do(submitReq)
-	if err != nil {
-		return nil, err
-	}
-
-	var wireResp common.InnerResp
-	err = json.NewDecoder(resp.Body).Decode(&wireResp)
-	if err != nil {
-		return nil, err
-	}
-	resp.Body.Close()
-
-	return &wireResp, nil
-}
-
-func (pc *ProxyClient) CancelRequest(requestId string) error {
-	jsonValue, err := json.Marshal(requestId)
-	if err != nil {
-		return err
-	}
-	log.Println("Attempting to cancel req", string(jsonValue))
-	cancelReq, err := http.NewRequest("POST", pc.BaseURL+"/backhaul/cancel", bytes.NewBuffer(jsonValue))
-	if err != nil {
-		return err
-	}
-	cancelReq.Header.Set("Content-Type", "application/json")
-	resp, err := httpClient.Do(cancelReq)
-	if err != nil {
-		return err
-	}
-	io.Copy(ioutil.Discard, resp.Body)
-	resp.Body.Close()
-	return nil
 }
 
 // Unconditionally processes the request through the multiplexing tunnel
