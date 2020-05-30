@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"sync/atomic"
 
 	"github.com/danopia/plex-backhaul/common"
 )
@@ -28,6 +29,9 @@ func (pc *ProxyClient) runMetrics(intervalSecs int) {
 
 		pc.lock.Lock()
 		batch.AddGaugeInt("live_channels", len(pc.Channels))
+
+		batch.AddCountUint64("http_requests", atomic.SwapUint64(&pc.directTally, 0), "transport:direct")
+		batch.AddCountUint64("http_requests", atomic.SwapUint64(&pc.tunnelTally, 0), "transport:tunnel")
 
 		waitingPackets := 0
 		blockedSockets := 0

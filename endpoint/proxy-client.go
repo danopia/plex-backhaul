@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"regexp"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/danopia/plex-backhaul/common"
@@ -34,7 +35,9 @@ type ProxyClient struct {
 	LaneManager *LaneManager
 
 	directProxy *httputil.ReverseProxy
+	directTally uint64
 	tunnelProxy *httputil.ReverseProxy
+	tunnelTally uint64
 }
 
 func NewProxyClient(targetUrl, hostId string) (*ProxyClient, error) {
@@ -108,9 +111,11 @@ func (pc *ProxyClient) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 
 	if tunnelPattern.MatchString(req.URL.Path + "?" + req.URL.RawQuery) {
 		log.Println("Tunneling", req.Method, req.URL.Path)
+		atomic.AddUint64(&pc.tunnelTally, 1)
 		pc.tunnelProxy.ServeHTTP(res, req)
 	} else {
 		log.Println("Passthru", req.Method, req.URL.Path)
+		atomic.AddUint64(&pc.directTally, 1)
 		pc.directProxy.ServeHTTP(res, req)
 	}
 }
