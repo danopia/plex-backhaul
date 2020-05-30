@@ -33,7 +33,7 @@ func NewSocketHeadend(upstreamUrl string) *SocketHeadend {
 
 type BackhaulSocket struct {
 	Conn    *websocket.Conn
-	HealthC chan bool
+	GoneC   chan struct{}
 	WritesC chan []byte
 	// InUse   bool
 
@@ -60,7 +60,7 @@ func (sh *SocketHeadend) EstablishBackhaul(wsConn *websocket.Conn) error {
 	}
 	sh.backhauls[backhaulId] = &BackhaulSocket{
 		Conn:    wsConn,
-		HealthC: make(chan bool),
+		GoneC:   make(chan struct{}),
 		WritesC: make(chan []byte),
 		// InUse:   false,
 	}
@@ -80,7 +80,7 @@ func (sh *SocketHeadend) EstablishBackhaul(wsConn *websocket.Conn) error {
 func (sh *SocketHeadend) ReadForever(backhaulId string) {
 	backhaul := sh.backhauls[backhaulId]
 
-	defer close(backhaul.HealthC)
+	defer close(backhaul.GoneC)
 	for {
 		messageType, p, err := backhaul.Conn.ReadMessage()
 		if err != nil {
@@ -95,23 +95,23 @@ func (sh *SocketHeadend) ReadForever(backhaulId string) {
 	// clean up
 	sh.lock.Lock()
 	defer sh.lock.Unlock()
-
 	delete(sh.backhauls, backhaulId)
 }
 
 func (sh *SocketHeadend) PumpWrites(backhaulId string) {
 	backhaul := sh.backhauls[backhaulId]
 
-	defer close(backhaul.WritesC)
+	// defer close(backhaul.WritesC)
 	for buf := range backhaul.WritesC {
-		if err := backhaul.Conn.WriteMessage(websocket.BinaryMessage, buf); err != nil {
+		err := backhaul.Conn.WriteMessage(websocket.BinaryMessage, buf)
+		if err != nil {
 			log.Println("PumpWrites:", err)
-			// TODO: cancel everything and unregister us
-			return
+			// TODO: need to know when we have zero requests so we can close WritesC
+		} else {
+			// log.Println("wrote", len(buf), "bytes to", backhaulId)
+			atomic.AddInt32(&backhaul.MovedBytes, int32(len(buf)))
+			atomic.AddInt32(&backhaul.MovedPackets, 1)
 		}
-		// log.Println("wrote", len(buf), "bytes to", backhaulId)
-		atomic.AddInt32(&backhaul.MovedBytes, int32(len(buf)))
-		atomic.AddInt32(&backhaul.MovedPackets, 1)
 	}
 }
 
@@ -170,9 +170,10 @@ func (sh *SocketHeadend) SubmitRequest(innerReq *common.InnerReq) (*common.Inner
 	// TODO: make a FannedRequest type
 	sh.lock.Lock()
 	fanout := &Fanout{
-		RequestId: requestId,
-		ChanId:    uint16(innerReq.ChanId),
-		OutC:      make(chan []byte, 4),
+		RequestId:  requestId,
+		ChanId:     uint16(innerReq.ChanId),
+		OutC:       make(chan []byte, 4),
+		CancelFunc: cancelFunc,
 	}
 	sh.fanouts[requestId] = fanout
 	sh.lock.Unlock()
@@ -180,7 +181,7 @@ func (sh *SocketHeadend) SubmitRequest(innerReq *common.InnerReq) (*common.Inner
 	// wire Fanout input and output[s]
 	for _, sockId := range innerReq.BackhaulIds {
 		backhaul := sh.backhauls[sockId]
-		go fanout.PumpTo(backhaul.WritesC)
+		go fanout.PumpTo(backhaul.WritesC, backhaul.GoneC)
 	}
 
 	go func() {
