@@ -16,8 +16,9 @@ type LaneManager struct {
 	MaxUtilization int
 	IdPrefix       string
 
-	OfferBufferFunc func(chanId uint16, offset uint64, buf []byte)
-	Lanes           map[string]*DataLane
+	Lanes        map[string]*DataLane
+	Bundles      map[uint16]*LaneBundle
+	nextBundleId uint16
 
 	lock   sync.Mutex
 	dialer *websocket.Dialer
@@ -27,9 +28,10 @@ func NewLaneManager(websocketUrl, idPrefix string) *LaneManager {
 	return &LaneManager{
 		WebsocketURL:   websocketUrl,
 		MaxUtilization: 4,
+		IdPrefix:       idPrefix,
 
-		IdPrefix: idPrefix,
-		Lanes:    make(map[string]*DataLane),
+		Lanes:   make(map[string]*DataLane),
+		Bundles: make(map[uint16]*LaneBundle),
 
 		dialer: &websocket.Dialer{
 			ReadBufferSize:  1024 * 17,
@@ -44,6 +46,17 @@ type DataLane struct {
 	Conn    *websocket.Conn
 	WritesC chan []byte
 	InUse   int
+}
+
+func (pc *LaneManager) OfferBuffer(chanId uint16, offset uint64, buf []byte) {
+	pc.lock.Lock()
+	if channel, ok := pc.Bundles[chanId]; ok {
+		pc.lock.Unlock()
+		channel.OfferBuffer(offset, buf)
+	} else {
+		pc.lock.Unlock()
+		log.Println("WARN: got buffer for unknown bundle", chanId, "with", len(buf), "bytes")
+	}
 }
 
 // Manage a pool of sockets to hold onto and reuse
@@ -85,8 +98,38 @@ func (lm *LaneManager) MaintainSockets(desiredCount int) {
 	}
 }
 
+func (lm *LaneManager) AllocateBundle(desiredLaneCount int) (*LaneBundle, error) {
+	// select least-utilized sockets
+	lanes := lm.AllocateLanes(desiredLaneCount)
+	if len(lanes) < 1 {
+		return nil, fmt.Errorf("No sockets available, sorry")
+	}
+
+	lm.lock.Lock()
+	bundle := NewLaneBundle(lm.nextBundleId, lanes)
+	lm.Bundles[bundle.BundleId] = bundle
+	lm.nextBundleId++
+	lm.lock.Unlock()
+
+	go lm.ScheduleBundleTeardown(bundle)
+	return bundle, nil
+}
+
+func (lm *LaneManager) ScheduleBundleTeardown(bundle *LaneBundle) {
+	<-bundle.DoneC
+	lm.lock.Lock()
+	defer lm.lock.Unlock()
+
+	// Delete our registration
+	delete(lm.Bundles, bundle.BundleId)
+	// Unmark the sockets
+	for _, lane := range bundle.Lanes {
+		lane.InUse--
+	}
+}
+
 // Selects and reserves at most the desired number of lanes
-func (lm *LaneManager) AllocateLanes(desiredCount int) ([]string, []*DataLane) {
+func (lm *LaneManager) AllocateLanes(desiredCount int) []*DataLane {
 	lm.lock.Lock()
 	defer lm.lock.Unlock()
 
@@ -132,14 +175,12 @@ func (lm *LaneManager) AllocateLanes(desiredCount int) ([]string, []*DataLane) {
 	}
 
 	// reserve the selected sockets
-	sockKeys := make([]string, len(socks))
-	for idx, sock := range socks {
-		sockKeys[idx] = sock.LaneId
+	for _, sock := range socks {
 		sock.InUse++
 		// log.Println("Got", sock.LaneId, "@", sock.InUse)
 	}
 
-	return sockKeys, socks
+	return socks
 }
 
 // Opens a new websocket
@@ -194,7 +235,7 @@ func (lm *LaneManager) ReadForever(lane *DataLane) {
 
 		chanId := binary.LittleEndian.Uint16(p[0:])
 		offset := binary.LittleEndian.Uint64(p[2:])
-		lm.OfferBufferFunc(chanId, offset, p[10:])
+		lm.OfferBuffer(chanId, offset, p[10:])
 	}
 
 	// clean up

@@ -6,47 +6,64 @@ import (
 	"sync"
 )
 
-type BackhaulChannel struct {
-	FeedC      chan []byte
-	OutC       chan []byte
-	DoneC      <-chan struct{}
-	Sockets    []*DataLane
-	Offset     uint64
-	Done       bool
+type LaneBundle struct {
+	BundleId  uint16
+	RequestId string
+	Lanes     []*DataLane
+
+	FeedC  chan []byte
+	OutC   chan []byte
+	DoneC  <-chan struct{}
+	Offset uint64
+	Done   bool
+
+	doneC      chan<- struct{}
 	lock       sync.Mutex
 	readySocks map[uint64]*sync.Mutex
 }
 
-func NewBackhaulChannel(socks []*DataLane, w io.WriteCloser) *BackhaulChannel {
+func NewLaneBundle(bundleId uint16, lanes []*DataLane) *LaneBundle {
 	doneC := make(chan struct{})
-	channel := &BackhaulChannel{
-		FeedC:      make(chan []byte),
-		OutC:       make(chan []byte, 25),
-		DoneC:      doneC,
-		Sockets:    socks,
+	channel := &LaneBundle{
+		BundleId: bundleId,
+		Lanes:    lanes,
+
+		FeedC:  make(chan []byte),
+		OutC:   make(chan []byte, 25),
+		DoneC:  doneC,
+		Offset: 0,
+
+		doneC:      doneC,
 		readySocks: make(map[uint64]*sync.Mutex),
 	}
-	go channel.PumpOut(w, doneC)
+	// go channel.PumpOut(w, doneC)
 	go channel.SequenceBody()
-	// return channel, &chanReader{r, channel}
 	return channel
 }
 
-func (bc *BackhaulChannel) PumpOut(w io.WriteCloser, doneC chan<- struct{}) {
+func (bc *LaneBundle) LaneIDs() []string {
+	keys := make([]string, len(bc.Lanes))
+	for idx, sock := range bc.Lanes {
+		keys[idx] = sock.LaneId
+	}
+	return keys
+}
+
+func (bc *LaneBundle) PumpOut(w io.WriteCloser) {
 	defer w.Close()
-	defer close(doneC)
+	defer close(bc.doneC)
 	for buf := range bc.OutC {
 		// log.Println("Writing", len(buf), "bytes")
 		w.Write(buf)
 	}
 
-	log.Println("Output pump reached end")
+	log.Println("Request", bc.RequestId, "output reached end")
 	bc.lock.Lock()
 	bc.Done = true
 	bc.lock.Unlock()
 }
 
-func (bc *BackhaulChannel) SequenceBody() {
+func (bc *LaneBundle) SequenceBody() {
 	defer close(bc.OutC)
 	for buf := range bc.FeedC {
 		bc.OutC <- buf
@@ -62,32 +79,29 @@ func (bc *BackhaulChannel) SequenceBody() {
 		bc.lock.Unlock()
 	}
 }
-func (bc *BackhaulChannel) OfferBuffer(offset uint64, buf []byte) {
-	// log.Println("chan got", offset, len(buf))
+
+func (bc *LaneBundle) OfferBuffer(offset uint64, buf []byte) {
+	// log.Println("chan", bc.BundleId, "got", offset, len(buf))
 
 	// check if we're ready now
 	bc.lock.Lock()
 	if bc.Offset == offset {
-		// log.Println("Channel is ready now")
 		bc.lock.Unlock()
 	} else if bc.Offset > offset {
+		log.Println(bc.Offset, offset)
 		panic("Received buffer out of order")
 	} else {
 		lock := &sync.Mutex{}
 		lock.Lock() // will be unlocked when we're ready
+		// log.Println("Waiting for", offset, bc.Offset)
 		bc.readySocks[offset] = lock
-
-		// log.Println("Waiting for our turn...", offset)
 		bc.lock.Unlock()
+
 		lock.Lock() // actual wait for ready
-		// lock.Unlock()
-		// bc.lock.Lock()
-		// log.Println("It's our turn :)", offset)
 	}
 
 	if len(buf) > 0 {
-		// bc.Offset += uint64(len(buf))
-		// bc.lock.Unlock()
+		// TODO?: inline FeedC's reader here
 		bc.FeedC <- buf
 	} else {
 		close(bc.FeedC)

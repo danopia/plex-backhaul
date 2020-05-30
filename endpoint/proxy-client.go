@@ -11,7 +11,6 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"regexp"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -21,16 +20,12 @@ import (
 // Paths matching this get the websocket treatment
 var tunnelPattern = regexp.MustCompile("/transcode/universal/dash/|/chunk-|download=1|/file.mp4")
 
-var precachePattern = regexp.MustCompile("/([0-9]+)/([0-9]+).m4s$")
+var dashPathPattern = regexp.MustCompile("^(/video/:/transcode/universal/dash/[^/]+/[0-9]+/)([0-9]+)(\\.[^.]+)$")
 
 type ProxyClient struct {
 	BaseURL        string
 	DirectURL      *url.URL
 	MaxConcurrency int
-
-	Channels   map[uint16]*BackhaulChannel
-	nextChanId uint16
-	lock       sync.Mutex
 
 	LaneManager *LaneManager
 
@@ -66,11 +61,8 @@ func NewProxyClient(targetUrl, hostId string) (*ProxyClient, error) {
 		DirectURL:      target,
 		MaxConcurrency: 4,
 
-		Channels: make(map[uint16]*BackhaulChannel),
-
 		LaneManager: NewLaneManager(wsTarget.String(), hostId),
 	}
-	proxyClient.LaneManager.OfferBufferFunc = proxyClient.OfferBuffer
 	go proxyClient.runMetrics(20) // seconds
 
 	proxyClient.directProxy = httputil.NewSingleHostReverseProxy(target)
@@ -80,17 +72,6 @@ func NewProxyClient(targetUrl, hostId string) (*ProxyClient, error) {
 	}
 
 	return proxyClient, nil
-}
-
-func (pc *ProxyClient) OfferBuffer(chanId uint16, offset uint64, buf []byte) {
-	pc.lock.Lock()
-	if channel, ok := pc.Channels[chanId]; ok {
-		pc.lock.Unlock()
-		channel.OfferBuffer(offset, buf)
-	} else {
-		pc.lock.Unlock()
-		log.Println("WARN: got buffer for unknown channel", chanId, "with", len(buf), "bytes")
-	}
 }
 
 var httpClient *http.Client = &http.Client{
@@ -120,26 +101,6 @@ func (pc *ProxyClient) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 	}
 }
 
-func (pc *ProxyClient) AllocateReqLanes(req *common.InnerReq) (*BackhaulChannel, io.ReadCloser, error) {
-	// select least-utilized sockets
-	sockKeys, socks := pc.LaneManager.AllocateLanes(pc.MaxConcurrency)
-	if len(socks) < 1 {
-		return nil, nil, fmt.Errorf("No sockets available, sorry")
-	}
-
-	pc.lock.Lock()
-	chanReader, chanWriter := io.Pipe()
-	channel := NewBackhaulChannel(socks, chanWriter)
-	chanId := pc.nextChanId
-	pc.Channels[chanId] = channel
-	pc.nextChanId++
-	pc.lock.Unlock()
-
-	req.BackhaulIds = sockKeys
-	req.ChanId = chanId
-	return channel, chanReader, nil
-}
-
 func (pc *ProxyClient) SubmitWireRequest(wireReq *common.InnerReq) (*common.InnerResp, error) {
 	jsonValue, err := json.Marshal(wireReq)
 	if err != nil {
@@ -167,81 +128,84 @@ func (pc *ProxyClient) SubmitWireRequest(wireReq *common.InnerReq) (*common.Inne
 	return &wireResp, nil
 }
 
+func (pc *ProxyClient) CancelRequest(requestId string) error {
+	jsonValue, err := json.Marshal(requestId)
+	if err != nil {
+		return err
+	}
+	log.Println("Attempting to cancel req", string(jsonValue))
+	cancelReq, err := http.NewRequest("POST", pc.BaseURL+"/backhaul/cancel", bytes.NewBuffer(jsonValue))
+	if err != nil {
+		return err
+	}
+	cancelReq.Header.Set("Content-Type", "application/json")
+	resp, err := httpClient.Do(cancelReq)
+	if err != nil {
+		return err
+	}
+	io.Copy(ioutil.Discard, resp.Body)
+	resp.Body.Close()
+	return nil
+}
+
 // Unconditionally processes the request through the multiplexing tunnel
 func (pc *ProxyClient) RoundTrip(req *http.Request) (*http.Response, error) {
 	t0 := time.Now()
+
+	if dashMatch := dashPathPattern.FindStringSubmatch(req.URL.Path); dashMatch != nil {
+		log.Println("TODO: DASH request for segment", dashMatch[2])
+	}
+
+	bundle, err := pc.LaneManager.AllocateBundle(pc.MaxConcurrency)
+	if err != nil {
+		return nil, err
+	}
 
 	wireReq := common.InnerReq{
 		Method:  req.Method,
 		Path:    req.URL.Path,
 		Query:   req.URL.RawQuery,
 		Headers: req.Header,
-	}
-	channel, chanReader, err := pc.AllocateReqLanes(&wireReq)
-	if err != nil {
-		return nil, err
-	}
 
-	tAlloced := time.Now()
-
-	// if precachePattern.MatchString(wireReq.Path) {
-	// 	precachePath := precachePattern.ReplaceAllString(wireReq.Path, "/0/$1")
-	// 	log.Println("TODO: Precaching", precachePath)
-	// }
+		BackhaulIds: bundle.LaneIDs(),
+		ChanId:      bundle.BundleId,
+	}
 
 	wireResp, err := pc.SubmitWireRequest(&wireReq)
 	if err != nil {
 		return nil, err
 	}
+	bundle.RequestId = wireResp.RequestId
 
 	tSubmitted := time.Now()
 
-	// Cleanup when the response is all done
-	go func() {
-		<-channel.DoneC
-		pc.lock.Lock()
-		defer pc.lock.Unlock()
-
-		// Delete our registration
-		delete(pc.Channels, wireReq.ChanId)
-		// Unmark the sockets
-		for _, sock := range channel.Sockets {
-			sock.InUse--
-		}
-	}()
+	// Start reassembling the buffers into a Reader
+	chanReader, chanWriter := io.Pipe()
+	go bundle.PumpOut(chanWriter)
 
 	go func(ch <-chan struct{}) {
 		<-ch
-		if !channel.Done {
-			jsonValue, err := json.Marshal(wireResp.RequestId)
-			if err != nil {
-				panic(err)
-			}
-			log.Println("Attempting to cancel req", string(jsonValue))
-			cancelReq, err := http.NewRequest("POST", pc.BaseURL+"/backhaul/cancel", bytes.NewBuffer(jsonValue))
-			if err != nil {
-				panic(err)
-			}
-			cancelReq.Header.Set("Content-Type", "application/json")
-			resp, err := httpClient.Do(cancelReq)
-			if err != nil {
-				panic(err)
-			}
-			io.Copy(ioutil.Discard, resp.Body)
-			resp.Body.Close()
+		if !bundle.Done {
+			pc.CancelRequest(bundle.RequestId)
 		}
 	}(req.Context().Done())
 
-	realResp := &http.Response{
-		Status:     wireResp.Status,
-		StatusCode: wireResp.StatusCode,
+	realResp := MakeHttpResponse(wireResp, chanReader)
+	realResp.Header.Add("Server-Timing", fmt.Sprintf(
+		"fanout, submit;dur=%v",
+		tSubmitted.Sub(t0).Milliseconds()))
+
+	return realResp, nil
+}
+
+func MakeHttpResponse(ir *common.InnerResp, body io.ReadCloser) *http.Response {
+	return &http.Response{
+		Status:     ir.Status,
+		StatusCode: ir.StatusCode,
 		Proto:      "HTTP/1.1",
 		ProtoMajor: 1,
 		ProtoMinor: 1,
-		Header:     wireResp.Headers,
-		Body:       chanReader,
+		Header:     ir.Headers,
+		Body:       body,
 	}
-	realResp.Header.Add("Server-Timing", fmt.Sprintf("fanout, alloc;dur=%v, submit;dur=%v", tAlloced.Sub(t0).Milliseconds(), tSubmitted.Sub(tAlloced).Milliseconds()))
-
-	return realResp, nil
 }
