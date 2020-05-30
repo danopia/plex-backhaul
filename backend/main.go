@@ -31,7 +31,7 @@ func main() {
 	}
 
 	headend := NewSocketHeadend(upstreamUrl)
-	go headend.runMetrics(10) // seconds
+	go headend.runMetrics(20) // seconds
 
 	// Mount a normal proxy to Plex at the root
 	directProxy := httputil.NewSingleHostReverseProxy(proxyTarget)

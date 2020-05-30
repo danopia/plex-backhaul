@@ -44,19 +44,29 @@ func (me *MetricsEmitter) CollectForever(intervalSecs int, collectorFunc func(*M
 	for now := range time.Tick(time.Duration(intervalSecs) * time.Second) {
 
 		batchDate := float64(now.Unix() - int64(intervalSecs/2))
-		batch := &MetricsBatch{
-			emitter:   me,
-			batchDate: datadog.Float64(batchDate),
+
+		appBatch := &MetricsBatch{
+			metricPrefix: me.metricPrefix,
+			emitter:      me,
+			batchDate:    datadog.Float64(batchDate),
 		}
+		collectorFunc(appBatch)
 
-		collectorFunc(batch)
+		golangBatch := &MetricsBatch{
+			metricPrefix: "golang.",
+			emitter:      me,
+			batchDate:    datadog.Float64(batchDate),
+		}
+		golangBatch.ObserveGolangRuntime()
 
-		if len(batch.metrics) > 0 {
-			err := me.client.PostMetrics(batch.metrics)
+		allMetrics := append(appBatch.metrics, golangBatch.metrics...)
+
+		if len(allMetrics) > 0 {
+			err := me.client.PostMetrics(allMetrics)
 			if err != nil {
-				log.Println("metrics error", err)
+				log.Println("metrics error", err.Error())
 			} else {
-				log.Println("Submitted", len(batch.metrics), "metrics")
+				log.Println("Submitted", len(allMetrics), "metrics")
 			}
 		}
 	}

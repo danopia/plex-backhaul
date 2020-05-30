@@ -26,7 +26,7 @@ func NewSocketHeadend(upstreamUrl string) *SocketHeadend {
 	return &SocketHeadend{
 		upstreamUrl: upstreamUrl,
 		backhauls:   make(map[string]*BackhaulSocket),
-    fanouts:     make(map[string]*Fanout),
+		fanouts:     make(map[string]*Fanout),
 		cancelFuncs: make(map[string]context.CancelFunc),
 	}
 }
@@ -170,9 +170,9 @@ func (sh *SocketHeadend) SubmitRequest(innerReq *common.InnerReq) (*common.Inner
 	// TODO: make a FannedRequest type
 	sh.lock.Lock()
 	fanout := &Fanout{
-    RequestId: requestId,
-		ChanId: uint16(innerReq.ChanId),
-		OutC:   make(chan []byte, 4),
+		RequestId: requestId,
+		ChanId:    uint16(innerReq.ChanId),
+		OutC:      make(chan []byte, 4),
 	}
 	sh.fanouts[requestId] = fanout
 	sh.lock.Unlock()

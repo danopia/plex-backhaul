@@ -14,22 +14,22 @@ import (
 type LaneManager struct {
 	WebsocketURL   string
 	MaxUtilization int
-	IdPrefix     string
+	IdPrefix       string
 
-  OfferBufferFunc func(chanId uint16, offset uint64, buf []byte)
-	Lanes  map[string]*DataLane
+	OfferBufferFunc func(chanId uint16, offset uint64, buf []byte)
+	Lanes           map[string]*DataLane
 
-	lock       sync.Mutex
+	lock   sync.Mutex
 	dialer *websocket.Dialer
 }
 
 func NewLaneManager(websocketUrl, idPrefix string) *LaneManager {
-  return &LaneManager{
+	return &LaneManager{
 		WebsocketURL:   websocketUrl,
 		MaxUtilization: 4,
 
-		IdPrefix:    idPrefix,
-		Lanes: make(map[string]*DataLane),
+		IdPrefix: idPrefix,
+		Lanes:    make(map[string]*DataLane),
 
 		dialer: &websocket.Dialer{
 			ReadBufferSize:  1024 * 17,
@@ -87,8 +87,8 @@ func (lm *LaneManager) MaintainSockets(desiredCount int) {
 
 // Selects and reserves at most the desired number of lanes
 func (lm *LaneManager) AllocateLanes(desiredCount int) ([]string, []*DataLane) {
-  lm.lock.Lock()
-  defer lm.lock.Unlock()
+	lm.lock.Lock()
+	defer lm.lock.Unlock()
 
 	// select least-utilized sockets
 	socks := make([]*DataLane, 0)
@@ -139,7 +139,7 @@ func (lm *LaneManager) AllocateLanes(desiredCount int) ([]string, []*DataLane) {
 		// log.Println("Got", sock.LaneId, "@", sock.InUse)
 	}
 
-  return sockKeys, socks
+	return sockKeys, socks
 }
 
 // Opens a new websocket
@@ -165,7 +165,7 @@ func (lm *LaneManager) OpenLane(desiredId string) error {
 		return fmt.Errorf("First websocket frame was type %v, wanted Text", messageType)
 	}
 
-  lane := &DataLane{
+	lane := &DataLane{
 		LaneId: string(chunk),
 		Conn:   wsConn,
 		InUse:  0,
@@ -193,8 +193,8 @@ func (lm *LaneManager) ReadForever(lane *DataLane) {
 		}
 
 		chanId := binary.LittleEndian.Uint16(p[0:])
-    offset := binary.LittleEndian.Uint64(p[2:])
-    lm.OfferBufferFunc(chanId, offset, p[10:])
+		offset := binary.LittleEndian.Uint64(p[2:])
+		lm.OfferBufferFunc(chanId, offset, p[10:])
 	}
 
 	// clean up

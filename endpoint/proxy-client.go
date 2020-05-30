@@ -2,10 +2,10 @@ package main
 
 import (
 	"bytes"
-	"io"
-	"io/ioutil"
 	"encoding/json"
 	"fmt"
+	"io"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"net/http/httputil"
@@ -20,7 +20,7 @@ import (
 // Paths matching this get the websocket treatment
 var tunnelPattern = regexp.MustCompile("/transcode/universal/dash/|/chunk-|download=1|/file.mp4")
 
-var precachePattern = regexp.MustCompile("/([0-9]+)/([0-9]+.m4s)$")
+var precachePattern = regexp.MustCompile("/([0-9]+)/([0-9]+).m4s$")
 
 type ProxyClient struct {
 	BaseURL        string
@@ -33,8 +33,8 @@ type ProxyClient struct {
 
 	LaneManager *LaneManager
 
-	directProxy  *httputil.ReverseProxy
-	tunnelProxy  *httputil.ReverseProxy
+	directProxy *httputil.ReverseProxy
+	tunnelProxy *httputil.ReverseProxy
 }
 
 func NewProxyClient(targetUrl, hostId string) (*ProxyClient, error) {
@@ -63,12 +63,12 @@ func NewProxyClient(targetUrl, hostId string) (*ProxyClient, error) {
 		DirectURL:      target,
 		MaxConcurrency: 4,
 
-		Channels:  make(map[uint16]*BackhaulChannel),
+		Channels: make(map[uint16]*BackhaulChannel),
 
 		LaneManager: NewLaneManager(wsTarget.String(), hostId),
 	}
 	proxyClient.LaneManager.OfferBufferFunc = proxyClient.OfferBuffer
-	go proxyClient.runMetrics(10) // seconds
+	go proxyClient.runMetrics(20) // seconds
 
 	proxyClient.directProxy = httputil.NewSingleHostReverseProxy(target)
 	proxyClient.tunnelProxy = &httputil.ReverseProxy{
@@ -91,10 +91,10 @@ func (pc *ProxyClient) OfferBuffer(chanId uint16, offset uint64, buf []byte) {
 }
 
 var httpClient *http.Client = &http.Client{
-  Transport: &http.Transport{
-    MaxIdleConnsPerHost: 10,
-  },
-  // Timeout: time.Duration(RequestTimeout) * time.Second,
+	Transport: &http.Transport{
+		MaxIdleConnsPerHost: 10,
+	},
+	// Timeout: time.Duration(RequestTimeout) * time.Second,
 }
 
 // Makes a decision about how a request should be serviced
@@ -123,14 +123,15 @@ func (pc *ProxyClient) AllocateReqLanes(req *common.InnerReq) (*BackhaulChannel,
 	}
 
 	pc.lock.Lock()
-	channel, chanReader := NewBackhaulChannel(socks)
+	chanReader, chanWriter := io.Pipe()
+	channel := NewBackhaulChannel(socks, chanWriter)
 	chanId := pc.nextChanId
 	pc.Channels[chanId] = channel
 	pc.nextChanId++
 	pc.lock.Unlock()
 
 	req.BackhaulIds = sockKeys
-	req.ChanId =      chanId
+	req.ChanId = chanId
 	return channel, chanReader, nil
 }
 
@@ -141,12 +142,12 @@ func (pc *ProxyClient) SubmitWireRequest(wireReq *common.InnerReq) (*common.Inne
 	}
 	// log.Println(string(jsonValue))
 
-  submitReq, err := http.NewRequest("POST", pc.BaseURL+"/backhaul/submit", bytes.NewBuffer(jsonValue))
-  if err != nil {
-    return nil, err
-  }
-  submitReq.Header.Set("Content-Type", "application/json")
-  resp, err := httpClient.Do(submitReq)
+	submitReq, err := http.NewRequest("POST", pc.BaseURL+"/backhaul/submit", bytes.NewBuffer(jsonValue))
+	if err != nil {
+		return nil, err
+	}
+	submitReq.Header.Set("Content-Type", "application/json")
+	resp, err := httpClient.Do(submitReq)
 	if err != nil {
 		return nil, err
 	}
@@ -166,10 +167,10 @@ func (pc *ProxyClient) RoundTrip(req *http.Request) (*http.Response, error) {
 	t0 := time.Now()
 
 	wireReq := common.InnerReq{
-		Method:      req.Method,
-		Path:        req.URL.Path,
-		Query:       req.URL.RawQuery,
-		Headers:     req.Header,
+		Method:  req.Method,
+		Path:    req.URL.Path,
+		Query:   req.URL.RawQuery,
+		Headers: req.Header,
 	}
 	channel, chanReader, err := pc.AllocateReqLanes(&wireReq)
 	if err != nil {
@@ -213,11 +214,11 @@ func (pc *ProxyClient) RoundTrip(req *http.Request) (*http.Response, error) {
 			}
 			log.Println("Attempting to cancel req", string(jsonValue))
 			cancelReq, err := http.NewRequest("POST", pc.BaseURL+"/backhaul/cancel", bytes.NewBuffer(jsonValue))
-		  if err != nil {
-		    panic(err)
-		  }
-		  cancelReq.Header.Set("Content-Type", "application/json")
-		  resp, err := httpClient.Do(cancelReq)
+			if err != nil {
+				panic(err)
+			}
+			cancelReq.Header.Set("Content-Type", "application/json")
+			resp, err := httpClient.Do(cancelReq)
 			if err != nil {
 				panic(err)
 			}

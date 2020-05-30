@@ -16,13 +16,8 @@ type BackhaulChannel struct {
 	lock       sync.Mutex
 	readySocks map[uint64]*sync.Mutex
 }
-type chanReader struct {
-	reader  *io.PipeReader
-	channel *BackhaulChannel
-}
 
-func NewBackhaulChannel(socks []*DataLane) (*BackhaulChannel, io.ReadCloser) {
-	r, w := io.Pipe()
+func NewBackhaulChannel(socks []*DataLane, w io.WriteCloser) *BackhaulChannel {
 	doneC := make(chan struct{})
 	channel := &BackhaulChannel{
 		FeedC:      make(chan []byte),
@@ -34,10 +29,10 @@ func NewBackhaulChannel(socks []*DataLane) (*BackhaulChannel, io.ReadCloser) {
 	go channel.PumpOut(w, doneC)
 	go channel.SequenceBody()
 	// return channel, &chanReader{r, channel}
-	return channel, r
+	return channel
 }
 
-func (bc *BackhaulChannel) PumpOut(w *io.PipeWriter, doneC chan<- struct{}) {
+func (bc *BackhaulChannel) PumpOut(w io.WriteCloser, doneC chan<- struct{}) {
 	defer w.Close()
 	defer close(doneC)
 	for buf := range bc.OutC {
@@ -48,9 +43,6 @@ func (bc *BackhaulChannel) PumpOut(w *io.PipeWriter, doneC chan<- struct{}) {
 	log.Println("Output pump reached end")
 	bc.lock.Lock()
 	bc.Done = true
-	// for _, sock := range bc.Sockets {
-	// 	sock.InUse -= 1 // TODO: racy
-	// }
 	bc.lock.Unlock()
 }
 
@@ -100,13 +92,4 @@ func (bc *BackhaulChannel) OfferBuffer(offset uint64, buf []byte) {
 	} else {
 		close(bc.FeedC)
 	}
-}
-
-func (cr *chanReader) Read(p []byte) (n int, err error) {
-	// log.Println("read req", len(p))
-	return cr.reader.Read(p)
-}
-func (cr *chanReader) Close() error {
-	log.Println("TODO: submit close() upstream")
-	return cr.reader.Close()
 }

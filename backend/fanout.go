@@ -14,9 +14,9 @@ import (
 // Minimal framing is added to allow recombination later
 
 type Fanout struct {
-  RequestId string
-	ChanId uint16
-	OutC   chan []byte
+	RequestId string
+	ChanId    uint16
+	OutC      chan []byte
 }
 
 func (f *Fanout) PumpTo(sockC chan<- []byte) {

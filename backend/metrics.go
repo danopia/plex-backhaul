@@ -16,9 +16,9 @@ func (sh *SocketHeadend) runMetrics(intervalSecs int) {
 		sh.lock.Lock()
 		defer sh.lock.Unlock()
 
-		batch.AddGauge("live_sockets", float64(len(sh.backhauls)))
-		batch.AddGauge("live_fanouts", float64(len(sh.fanouts)))
-		batch.AddGauge("live_requests", float64(len(sh.cancelFuncs)))
+		batch.AddGaugeInt("live_sockets", len(sh.backhauls))
+		batch.AddGaugeInt("live_fanouts", len(sh.fanouts))
+		batch.AddGaugeInt("live_requests", len(sh.cancelFuncs))
 
 		for sockId, sock := range sh.backhauls {
 			movedBytes := atomic.SwapInt32(&sock.MovedBytes, 0)
@@ -36,7 +36,7 @@ func (sh *SocketHeadend) runMetrics(intervalSecs int) {
 		for _, fanout := range sh.fanouts {
 			waitingPackets += len(fanout.OutC)
 		}
-		batch.AddGauge("waiting_packets", float64(waitingPackets))
+		batch.AddGaugeInt("waiting_packets", waitingPackets)
 
 	})
 }
